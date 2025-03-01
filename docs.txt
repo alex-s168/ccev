@@ -1,0 +1,80 @@
+object ccev
+{
+  onEvent(args)
+
+  setSchedInterval(intv: number)
+
+  onceTimer(seconds: number): Timer
+
+  onceSignal(): OnceSignal
+
+  unboundedChannel(): UnboundedChannel
+
+  eventChannel(event_name, ...filter): UnboundedChannel
+
+  launch(fn: function(ctx, ...), ...): Thread
+}
+
+type OnceSignal : Waitable<nil>
+{
+  trySignal(self, value)
+
+  isDone(self) : bool
+}
+
+-- multiple-producer single-consumer (*) channel
+-- when an element is added,
+-- it will call the first registered waiter,
+-- and unregister the waiter!
+-- when no waiter is registered, but a element is pushed,
+-- it will queue that element
+type UnboundedChannel<T> : Waitable<T>
+{
+  push(self, T)
+}
+
+type Thread : Waitable<thread return type>
+{
+  -- wait for the next schedYield,
+  -- and then stops the thread
+  stop(self)
+
+  -- 1 is normal, below that is low priority, above that is high priority
+  setPriority(self, num)
+
+  isDone(self) : bool
+}
+
+-- can NOT be passed arround threads!
+type ThreadCtx
+{
+  -- makes the thread pause for a tiny bit
+  schedYield()
+
+  -- halts execution of this thread until
+  -- one of the wait objects signaled
+  -- returns the output of that wait object
+  waitForOne(...)
+
+  -- halts the execution of this thread until
+  -- all of the wait objects signaled
+  -- returns the outputs of the wait object as varialbe return
+  waitForAll(...)
+
+  -- called when the thread errors, but in the main loop
+  errorCallback = function(err)
+}
+
+interface Waiter
+{
+  -- gets called when the object that waiting for finished
+  -- note that this shouldn't do much computations because it gets called immediately after
+  notifySync(self, value)
+}
+
+interface Waitable
+{
+  -- Waiter:notifySync gets called when this is done
+  -- note that Waiter:notifySync might be called immediately, inside this function
+  addWaiter(self, waiter: Waiter)
+}
