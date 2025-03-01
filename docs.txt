@@ -1,6 +1,11 @@
 object ccev
 {
+  -- you should pass all event messages to this
   onEvent(args)
+
+  -- executes the function after the wait object, but SYNC.
+  -- you shouldn't have much code in the function
+  thenSync(wo: Waitable<T>, fn: function(T))
 
   setSchedInterval(intv: number)
 
@@ -10,9 +15,28 @@ object ccev
 
   unboundedChannel(): UnboundedChannel
 
-  eventChannel(event_name, ...filter): UnboundedChannel
+  eventChannel(event_name or list of events, ...filter): UnboundedChannel
+
+  onceEvent(event_name or list of events, ...filter): OnceSignal<event args>
 
   launch(fn: function(ctx, ...), ...): Thread
+}
+
+function ccev_io(ccev)
+{
+  http({
+    url = string,
+    body = string | nil,
+    headers = nil | { [string] = string },
+    binary = bool,
+    method = nil | "GET" | "POST" | "PATCH" | "DELETE",
+    redirect = string | nil,
+    timeout = number | nil
+  }): OnceSignal<{
+    success: bool,
+    error: string | nil,
+    response: cc http.Response | nil,
+  }>
 }
 
 type OnceSignal : Waitable<nil>
@@ -76,5 +100,10 @@ interface Waitable
 {
   -- Waiter:notifySync gets called when this is done
   -- note that Waiter:notifySync might be called immediately, inside this function
+  -- note that you cannot at the same waiter to a waitable multiple times!
   addWaiter(self, waiter: Waiter)
+
+  -- if the waiter was added before, and it was not triggered yet,
+  -- will make sure that the waiter will never be triggered. (removes the waiter)
+  cancelWaiter(self, waiter: Waiter)
 }

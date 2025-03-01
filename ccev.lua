@@ -1,7 +1,6 @@
 -- high-performance multi-threading and async I/O library
 
 local gThreads = {}
-local gSchedTimer = nil
 local gSchedS = 0.1
 local gTimers = {}
 -- ev name -> []func
@@ -47,6 +46,9 @@ local function onEvent(args)
           end
         end
         if not added then
+          for w,_ in pairs(th._waitingWaiters) do
+            w:_cancel()
+          end
           for _,w in ipairs(th._waiters) do
             w:notifySync(th._val)
           end
@@ -72,23 +74,67 @@ ccev = {
    gSchedS = seconds
  end,
 
- eventChannel = function(evn,...)
+ thenSync = function(wo, fn)
+   wo:addWaiter({
+     notifySync = function(self,args)
+       fn(args)
+     end
+   })
+ end,
+
+ eventChannel = function(evnli,...)
    local filters = {...}
    local ch = ccev.unboundedChannel()
-   gEventListeners[evn] = gEventListeners[evn] or {}
-   table.insert(gEventListeners[evn], function(args)
-     local ok = true
-     for i,f in ipairs(filters) do
-       if args[i + 1] ~= f then
-         ok = false
-         break
-       end
-     end
-     if ok then
-       ch:push({table.unpack(args)})
-     end
-   end)
+   if type(evnli) ~= "table" then
+     evnli = {evnli}
+   end
+   for _,evn in ipairs(evnli) do
+       gEventListeners[evn] = gEventListeners[evn] or {}
+       table.insert(gEventListeners[evn], function(args)
+         local ok = true
+         for i,f in ipairs(filters) do
+           if args[i + 1] ~= f then
+             ok = false
+             break
+           end
+         end
+         if ok then
+           ch:push({table.unpack(args)})
+         end
+       end)
+   end
    return ch
+ end,
+
+ onceEvent = function(evnli,...)
+    if type(evnli) ~= "table" then
+        evnli = {evnli}
+    end
+    local ch = ccev.eventChannel(evnli,...)
+    local sig = ccev.onceSignal()
+    ch:addWaiter({
+        _wasTrig = false,
+        _fn = gEventListeners[evnli[1]][#gEventListeners[evnli[1]]],
+        _evnli = evnli,
+
+        notifySync = function(self,args)
+            if self._wasTrig then
+                return
+            end
+            self._wasTrig = true
+            for _,evn in self._evnli do
+                local li = gEventListeners[evn]
+                for i,x in ipairs(li) do
+                    if x == self._fn then
+                        table.remove(li,i)
+                        break
+                    end
+                end
+            end
+            sig:trySignal(args)
+        end,
+    })
+    return sig
  end,
 
  unboundedChannel = function()
@@ -108,6 +154,15 @@ ccev = {
        end
      end,
 
+     cancelWaiter = function(self, waiter)
+       for i,x in ipairs(self._waiters) do
+         if x == waiter then
+           table.remove(self._waiters, i)
+           break
+         end
+       end
+     end,
+
      push = function(self, val)
        if #self._waiters > 0 then
          local w = table.remove(self._waiters, 1)
@@ -115,7 +170,7 @@ ccev = {
        else
          table.insert(self._q, {val})
        end
-     end
+     end,
    }
    return c
  end,
@@ -143,6 +198,15 @@ ccev = {
        table.insert(self._waiters, waiter)
       end
     end,
+
+    -- TODO: does CC allow us to cancel timers?
+    cancelWaiter = function(self, waiter)
+      for i,x in ipairs(self._waiters) do
+        if x == waiter then
+          table.remove(self._waiters, i)
+        end
+      end
+    end,
   }
   gTimers[os.startTimer(s)] = timer
   return timer
@@ -150,15 +214,33 @@ ccev = {
 
  onceSignal = function()
   local sig = {
-    _isSignal = true,
     _signaled = false,
     _val = nil,
     _waiters = {},
+  }
 
-    trySignal = function(self, val)
-      if not self._isSignal then
-        error("bruh")
+  sig.addWaiter = function(self,waiter)
+      if self:isDone() then
+        waiter:notifySync(self._val)
+      else
+        local a = self._waiters
+        a[#a+1] = waiter
       end
+  end
+
+  function sig:cancelWaiter(waiter)
+      for i,x in ipairs(self._waiters) do
+        if x == waiter then
+          table.remove(self._waiters, i)
+        end
+      end
+  end
+
+  function sig:isDone()
+      return self._signaled
+  end
+
+  function sig:trySignal(val)
       if self._signaled then
         return
       end
@@ -167,27 +249,7 @@ ccev = {
       for _,x in ipairs(self._waiters) do
         x:notifySync(val)
       end
-    end,
-
-    isDone = function(self)
-      if not self._isSignal then
-        error("Bruh")
-      end
-      return self._signaled
-    end,
-
-    addWaiter = function(self,waiter)
-      if not self._isSignal then
-        error("bruh")
-      end
-      if self:isDone() then
-        waiter:notifySync(self._val)
-      else
-        local a = self._waiters
-        a[#a+1] = waiter
-      end
-    end
-  }
+  end
   return sig
  end,
 
@@ -195,9 +257,9 @@ ccev = {
   local args = {...}
 
   local th = {
-    _err = nill,
+    _err = nil,
     _shouldStop = false,
-    _coro = coro,
+    _coro = nil,
     _args = args,
     _prio = 1,
     _ctx = nil,
@@ -206,6 +268,7 @@ ccev = {
     _waitValuesBoxed = {},
     -- contains a list of waiting for all
     _waitingForEither = {},
+    _waitingWaiters = {},
 
     errorCallback = function(e)
       error(e)
@@ -230,6 +293,14 @@ ccev = {
         table.insert(self._waiters,waiter)
       end
     end,
+
+    cancelWaiter = function(self, waiter)
+      for i,x in ipairs(self._waiters) do
+        if x == waiter then
+          table.remove(self._waiters, i)
+        end
+      end
+    end,
   }
   th._coro = coroutine.create(function(ctx,args)
     local status, err = pcall(fn, ctx, table.unpack(args))
@@ -239,23 +310,25 @@ ccev = {
     -- TODO: put waiters notify into this
   end)
   local function mkWaiter(wo)
-    return {
+    local wai = {
       _wano = false,
       _th = th,
+      _wo = wo,
+      _cancel = function(self)
+        self._wo:cancelWaiter(self)
+      end,
       notifySync = function(self,val)
         if self._wano then
           error("waiter was already notified")
         end
-        if not self._th then
-          error("wtf")
-        end
+        self._th._waitingWaiters[self] = nil
 
         self._wano = true
         local any = #self._th._waitingForEither == 0
         for i,li in ipairs(self._th._waitingForEither) do
           local new = {}
           for _,x in ipairs(li) do
-            if x ~= wo then
+            if x ~= self._wo then
               table.insert(new, x)
             end
           end
@@ -274,6 +347,8 @@ ccev = {
         table.insert(self._th._waitValuesBoxed, {val})
       end
     }
+    th._waitingWaiters[wai] = true
+    return wai
   end
   th._ctx = {
     _th = th,
